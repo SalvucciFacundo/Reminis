@@ -1,30 +1,24 @@
 # Reminis Architecture Specification
 
-**Version:** 0.1.0  
-**Status:** Draft / Prototype  
+**Version:** 0.2.0  
+**Status:** Approved Specification  
 **Language:** Go (1.23+)  
-**Repository:** `github.com/fds1288/reminis`  
+**Module:** `github.com/fds1288/reminis`  
 
 ---
 
 ## 1. Motivation & Problem Statement
 
 Modern LLM agents suffer from the **quadratic context problem**:
-1. **Context Bloat:** Traditional ReAct loops accumulate complete chat histories (`[turn_1, turn_2, ... turn_N]`). By turn 30, each request uploads tens of thousands of tokens.
+1. **Context Bloat:** Traditional ReAct loops accumulate chat histories (`[turn_1, turn_2, ... turn_N]`). By turn 30, each request uploads tens of thousands of tokens.
 2. **Attention Degradation:** As context balloons, LLMs lose focus (*needle-in-a-haystack* degradation), contradict earlier instructions, and hallucinate.
 3. **TPM / Rate Limit Exhaustion:** Re-sending 30,000 tokens on every step rapidly exhausts API tokens-per-minute (TPM) quotas or saturates local CPU memory bandwidth.
 
 ### The Solution: The OS-LLM Architecture
-In traditional computing:
-- **CPU:** Does not remember past programs; it processes current instructions in registers.
-- **RAM / Working Memory:** Fast, bounded, holds only active variables.
-- **Disk:** Durable, infinite, queried on demand.
-
-**Reminis** applies this architecture to LLM agents:
-- **The LLM is the CPU.**
-- **The Blackboard is the RAM (Working Memory).**
-- **The Knowledge Store is the Disk (Archival Memory).**
-- **Tasks are executed by ephemeral workers whose contexts are destroyed immediately upon completion.**
+- **CPU:** LLM (pure stateless compute).
+- **RAM / L1 (Working Memory):** Thread-safe Blackboard (scoped strictly to the active task graph).
+- **Disk (Archival / Long-term Memory):** Embedded SQLite database (sessions, facts, task ledger).
+- **Workers:** Ephemeral goroutines whose LLM context windows are destroyed immediately upon task completion.
 
 ---
 
@@ -65,8 +59,8 @@ In traditional computing:
                                    │
                                    ▼
                        ┌────────────────────────┐
-                       │   Reducer / Assembler  │
-                       │   (Final Synthesis)    │
+                       │     Pure-Go SQLite     │
+                       │   (WAL Mode Storage)   │
                        └────────────────────────┘
 ```
 
@@ -75,96 +69,123 @@ In traditional computing:
 ## 3. Core Components
 
 ### 3.1 Blackboard (Working Memory)
-A concurrent, thread-safe memory ledger representing the ground truth of the active workflow.
-
-- **Storage:** Key-value pairs protected by `sync.RWMutex`.
-- **Scope:** Scoped to the active workflow run.
-- **Behavior:**
-  - Workers read only specific keys declared in their dependencies.
-  - Workers write outputs back to designated keys.
-  - Generates immutable snapshots for worker injection.
+A concurrent, thread-safe memory ledger representing the ground truth of the active workflow run.
+- **Implementation:** `sync.RWMutex` guarding an in-memory key-value map.
+- **Isolation:** Workers receive an immutable sub-slice containing strictly the keys declared in their `InputKeys`.
+- **Checkpointing:** State snapshots are periodically flushed to SQLite for resume-on-failure.
 
 ### 3.2 Task Graph (DAG Scheduler)
-A Directed Acyclic Graph orchestrating task execution.
-
-- **Task Definition:**
-  ```go
-  type TaskStatus string
-
-  const (
-      StatusPending   TaskStatus = "PENDING"
-      StatusRunning   TaskStatus = "RUNNING"
-      StatusCompleted TaskStatus = "COMPLETED"
-      StatusFailed    TaskStatus = "FAILED"
-  )
-
-  type Task struct {
-      ID          string            `json:"id"`
-      Action      string            `json:"action"`
-      DependsOn   []string          `json:"depends_on"`
-      InputKeys   []string          `json:"input_keys"`
-      OutputKeys  []string          `json:"output_keys"`
-      Status      TaskStatus        `json:"status"`
-      Result      any               `json:"result,omitempty"`
-      Error       string            `json:"error,omitempty"`
-  }
-  ```
-- **Scheduler Logic:**
-  - Identifies all tasks where `Status == Pending` and all `DependsOn` tasks are `Status == Completed`.
-  - Dispatches ready tasks concurrently using `golang.org/x/sync/errgroup` or managed worker pools.
+- **Topological Sorting:** Resolves task execution order and detects circular dependencies prior to execution.
+- **Concurrency:** Uses `golang.org/x/sync/errgroup` to execute independent tasks in parallel goroutines.
+- **Resilience:** Per-task configurable retries (exponential backoff) and timeouts (`context.WithTimeout`).
 
 ### 3.3 Ephemeral Worker Engine
-Executes an isolated, stateless request to an LLM provider:
-- **Input Prompt Structure:**
-  1. System Prompt (Task-specific execution role).
-  2. Injected State (Strictly the values of `InputKeys` from the Blackboard).
-  3. Action Directive (The specific task action to execute).
-- **Token Budget:** Typically 300 to 800 tokens total per request.
-- **Lifecycle:** Upon completion, the worker updates the Blackboard and its context is discarded. No conversation history is retained between tasks.
+- **Stateless Request:** Combines:
+  1. System Prompt (Task role).
+  2. Blackboard inputs (strict JSON slice).
+  3. Action Directive.
+- **Budget:** 300 to 800 tokens total.
+- **Destruction:** Response is parsed into typed outputs and written to the Blackboard. The worker's LLM conversation context is completely discarded.
 
-### 3.4 Archival Store (Persistence)
-Durable storage for completed workflows, task results, and long-term project facts.
-- **Driver Options:** Pure-Go SQLite (`modernc.org/sqlite`) or local JSON/WAL ledger.
-- **Interface:**
-  ```go
-  type Store interface {
-      SaveRun(ctx context.Context, run *Run) error
-      GetRun(ctx context.Context, runID string) (*Run, error)
-      SaveFact(ctx context.Context, key string, value []byte) error
-      QueryFact(ctx context.Context, key string) ([]byte, error)
-  }
-  ```
+### 3.4 Archival Store (SQLite Pure-Go)
+- **Driver:** `modernc.org/sqlite` (100% CGO-free, cross-compilable to any OS/architecture).
+- **Concurrency Settings:** `PRAGMA journal_mode=WAL;`, `PRAGMA busy_timeout=5000;`.
+- **Database Schema:**
+
+```sql
+-- Active and past workflow runs
+CREATE TABLE IF NOT EXISTS runs (
+    id TEXT PRIMARY KEY,
+    session_id TEXT,
+    goal TEXT NOT NULL,
+    status TEXT NOT NULL, -- PENDING, RUNNING, COMPLETED, FAILED
+    total_tokens INTEGER DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    finished_at DATETIME
+);
+
+-- Discrete tasks within a DAG
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    action TEXT NOT NULL,
+    status TEXT NOT NULL,
+    depends_on TEXT,      -- JSON array of task IDs
+    input_data TEXT,      -- JSON payload of injected inputs
+    output_data TEXT,     -- JSON payload of worker outputs
+    duration_ms INTEGER DEFAULT 0,
+    tokens INTEGER DEFAULT 0,
+    error TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Sessions (Engram-compatible session tracking)
+CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    project_path TEXT NOT NULL,
+    status TEXT NOT NULL, -- ACTIVE, CLOSED
+    summary TEXT,
+    started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    ended_at DATETIME
+);
+
+-- Persistent facts / semantic memory
+CREATE TABLE IF NOT EXISTS facts (
+    id TEXT PRIMARY KEY,
+    session_id TEXT,
+    topic TEXT NOT NULL,
+    content TEXT NOT NULL,
+    scope TEXT DEFAULT 'project', -- project, user, global
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_facts_topic ON facts(topic);
+CREATE INDEX IF NOT EXISTS idx_tasks_run_id ON tasks(run_id);
+```
 
 ---
 
-## 4. Technical Specifications & Stack
+## 4. Interfaces & Consumption Models
+
+Reminis is designed to be consumed in three distinct modalities:
+
+1. **Go Library (`pkg/client`):** Directly imported into Go applications (like AGIS) for zero-latency, embedded agent orchestration.
+2. **Model Context Protocol (`reminis mcp`):** Exposes JSON-RPC over stdio so external IDEs and agents (Antigravity, Hermes, Cursor) can invoke Reminis memory and DAG tools natively:
+   - `reminis_session_start(project_path)`
+   - `reminis_save_fact(topic, content)`
+   - `reminis_query_facts(query)`
+   - `reminis_run_workflow(goal)`
+3. **CLI (`cmd/reminis`):** Standalone terminal command for running tasks, inspecting memory, and managing sessions.
+
+---
+
+## 5. Technical Specifications & Dependencies
 
 | Component | Choice | Rationale |
 | :--- | :--- | :--- |
-| **Language** | Go 1.23+ | Static binary, native concurrency (goroutines), minimal memory footprint. |
-| **Concurrency** | `sync.RWMutex`, `errgroup` | Race-free concurrent execution of independent DAG tasks. |
-| **LLM Provider Interface** | OpenAI-compatible HTTP client | Compatible with local `llama-server`, Ollama, vLLM, Groq, OpenRouter, Google AI Studio. |
-| **Serialization** | `encoding/json` | Standard, strongly typed schemas. |
-| **Storage Driver** | Pure-Go SQLite / Local WAL | Zero external CGO dependencies; portable cross-platform binaries. |
+| **Language** | Go 1.23+ | Native goroutines, fast startup, single static binary. |
+| **Database Driver** | `modernc.org/sqlite` | Pure Go, zero CGO requirements, runs on any ARM64/AMD64 OS. |
+| **Concurrency** | `sync.RWMutex`, `golang.org/x/sync/errgroup` | Race-free concurrent DAG dispatch. |
+| **LLM Protocol** | OpenAI-compatible HTTP | Native compatibility with local `llama-server`, Ollama, Gemini, Groq, OpenRouter. |
 
 ---
 
-## 5. Security & Isolation
+## 6. Implementation Roadmap
 
-1. **No Shared Chat Contexts:** Workers cannot pollute or inspect neighboring workers' context windows unless explicitly wired via Blackboard keys.
-2. **Context Leak Prevention:** Prompt templates strip credentials, secrets, or unreferenced Blackboard variables.
-3. **Execution Timeouts:** Each task has an individual `context.WithTimeout` to prevent stalled LLM calls from freezing the DAG.
-
----
-
-## 6. Implementation Milestones
-
-- [ ] **Milestone 1: Core Blackboard & DAG Engine**
-  - Implement `internal/blackboard` (thread-safe store + snapshots).
-  - Implement `internal/dag` (topological sort, ready task detection, cycle validation).
-- [ ] **Milestone 2: LLM Client & Ephemeral Worker**
-  - Implement `internal/worker` (OpenAI-compatible HTTP provider).
-  - Benchmark atomic token consumption per micro-task.
-- [ ] **Milestone 3: Planner & End-to-End Orchestrator**
-  - Implement decomposition prompt (Goal -> DAG).
-  - Concurrent execution of multi-step task graphs with live telemetry.
+- [ ] **Milestone 1: Core Engine**
+  - Implement `internal/blackboard` with concurrent snapshotting.
+  - Implement `internal/dag` with dependency resolution and cycle checking.
+  - Implement `internal/store` with pure-Go SQLite migrations and CRUD.
+- [ ] **Milestone 2: Worker & LLM Client**
+  - Implement HTTP client for OpenAI-compatible endpoints.
+  - Ephemeral prompt synthesizer and token consumption logger.
+- [ ] **Milestone 3: Planner & Orchestrator**
+  - LLM-based DAG generator (Goal -> Task list with dependencies).
+  - Concurrent DAG execution pipeline with auto-recovery and Blackboard updates.
+- [ ] **Milestone 4: Sessions & Fact Retrieval (Engram-parity)**
+  - `sessions` lifecycle and automatic fact extraction/indexing.
+  - Topic-based and keyword-based fast search.
+- [ ] **Milestone 5: Interfaces**
+  - CLI commands (`reminis run`, `reminis mem`, `reminis status`).
+  - Native MCP Server (`reminis mcp`).
