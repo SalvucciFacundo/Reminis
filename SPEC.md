@@ -1,6 +1,6 @@
 # Reminis Architecture Specification
 
-**Version:** 0.4.0  
+**Version:** 0.5.0  
 **Status:** Approved Specification  
 **Language:** Go (1.23+)  
 **Module:** `github.com/fds1288/reminis`  
@@ -86,7 +86,16 @@ A concurrent, thread-safe memory ledger representing the ground truth of the act
    - All state is preserved in SQLite, allowing the host agent or user to resolve the blocker and run `reminis resume <run_id>`.
    - *Optional:* When `--auto-recover` is enabled, Reminis executes one final surgical call to the Planner with the full post-run Blackboard state to formulate an alternative branch.
 
-### 3.3 Ephemeral Workers & Bounded Tool Execution (Max 3 Turns)
+### 3.3 Human-in-the-Loop Approval Gates
+Potentially destructive or high-impact actions (file deletion, database drops, git force-pushes, deployments) can be gated by an approval requirement:
+- **Task Flag:** `RequiresApproval: true`.
+- **State Transition:** The task pauses in `WAITING_APPROVAL`, while non-dependent tasks continue execution.
+- **Granular Permission Scopes:**
+  1. **Action (`action`):** Approves only this single task execution.
+  2. **Session (`session`):** Approves all subsequent actions of the same capability category (e.g. `fs:delete`, `git:push`) for the duration of the active session without further prompting.
+  3. **Permanent (`permanent` / allowlist):** Configured via CLI flag (`--auto-approve=all`) or configuration file for autonomous environments.
+
+### 3.4 Ephemeral Workers & Bounded Tool Execution (Max 3 Turns)
 Workers are permitted to execute real-world tools (`bash`, `read_file`, `write_file`, `git`), governed by strict bounding rules:
 1. **Hard Budget:** Maximum **3 tool execution turns** per worker.
 2. **Map-Reduce / Fan-Out Fan-In Pattern:**
@@ -95,28 +104,44 @@ Workers are permitted to execute real-world tools (`bash`, `read_file`, `write_f
    - An **Aggregator / Reducer Worker** reads the partial Blackboard entries and synthesizes the unified conclusion.
 3. **Context Destruction:** Large tool outputs (e.g., 50,000 tokens of raw `git diff` or build logs) exist only within the ephemeral worker's temporary process. Once the worker summarizes its findings into the Blackboard, its entire conversation context is garbage collected.
 
-### 3.4 Structured Telemetry
+### 3.5 Structured Telemetry & Task Structs
 ```go
+type TaskStatus string
+
+const (
+    StatusPending         TaskStatus = "PENDING"
+    StatusRunning         TaskStatus = "RUNNING"
+    StatusWaitingApproval TaskStatus = "WAITING_APPROVAL"
+    StatusCompleted       TaskStatus = "COMPLETED"
+    StatusFailed          TaskStatus = "FAILED"
+    StatusSkipped         TaskStatus = "SKIPPED"
+)
+
+type Task struct {
+    ID               string     `json:"id"`
+    Action           string     `json:"action"`
+    DependsOn        []string   `json:"depends_on"`
+    InputKeys        []string   `json:"input_keys"`
+    OutputKeys       []string   `json:"output_keys"`
+    RequiresApproval bool       `json:"requires_approval"`
+    Status           TaskStatus `json:"status"`
+    Result           any        `json:"result,omitempty"`
+    Error            string     `json:"error,omitempty"`
+}
+
 type RunResult struct {
     RunID           string       `json:"run_id"`
-    Status          RunStatus    `json:"status"` // COMPLETED, FAILED_WITH_CHECKPOINT
+    Status          RunStatus    `json:"status"` // COMPLETED, FAILED_WITH_CHECKPOINT, WAITING_APPROVAL
     CompletedTasks  []string     `json:"completed_tasks"`
     SkippedTasks    []string     `json:"skipped_tasks"`
+    WaitingTasks    []string     `json:"waiting_tasks,omitempty"`
     FailedTask      *TaskFailure `json:"failed_task,omitempty"`
     CanResume       bool         `json:"can_resume"`
     BlackboardKeys  []string     `json:"blackboard_keys"`
 }
-
-type TaskFailure struct {
-    TaskID      string `json:"task_id"`
-    Action      string `json:"action"`
-    Error       string `json:"error"`
-    Attempts    int    `json:"attempts"`
-    LastPayload string `json:"last_payload,omitempty"`
-}
 ```
 
-### 3.5 Archival Store (SQLite Pure-Go)
+### 3.6 Archival Store (SQLite Pure-Go)
 - **Driver:** `modernc.org/sqlite` (100% CGO-free, cross-compilable to any OS/architecture).
 - **Concurrency Settings:** `PRAGMA journal_mode=WAL;`, `PRAGMA busy_timeout=5000;`.
 - **Database Schema:**
@@ -127,7 +152,7 @@ CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY,
     session_id TEXT,
     goal TEXT NOT NULL,
-    status TEXT NOT NULL, -- PENDING, RUNNING, COMPLETED, FAILED_WITH_CHECKPOINT
+    status TEXT NOT NULL, -- PENDING, RUNNING, WAITING_APPROVAL, COMPLETED, FAILED_WITH_CHECKPOINT
     total_tokens INTEGER DEFAULT 0,
     checkpoint_state TEXT, -- Serialized Blackboard JSON
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -139,7 +164,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     action TEXT NOT NULL,
-    status TEXT NOT NULL, -- PENDING, RUNNING, COMPLETED, FAILED, SKIPPED
+    status TEXT NOT NULL, -- PENDING, RUNNING, WAITING_APPROVAL, COMPLETED, FAILED, SKIPPED
+    requires_approval BOOLEAN DEFAULT FALSE,
     depends_on TEXT,      -- JSON array of task IDs
     input_data TEXT,      -- JSON payload of injected inputs
     output_data TEXT,     -- JSON payload of worker outputs
@@ -156,6 +182,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     project_path TEXT NOT NULL,
     status TEXT NOT NULL, -- ACTIVE, CLOSED
     summary TEXT,
+    permissions_scope TEXT DEFAULT 'action', -- action, session, permanent
     started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     ended_at DATETIME
 );
@@ -186,9 +213,11 @@ CREATE INDEX IF NOT EXISTS idx_tasks_run_id ON tasks(run_id);
    - `reminis_query_facts(query)`
    - `reminis_run_workflow(goal)`
    - `reminis_resume_workflow(run_id)`
+   - `reminis_approve_task(run_id, task_id, scope)`
 3. **CLI (`cmd/reminis`):** Standalone terminal command for running tasks, inspecting memory, and managing sessions:
    - `reminis run "Crear endpoint de login"`
    - `reminis resume <run_id>`
+   - `reminis approve <run_id> <task_id> [--scope=action|session|permanent]`
    - `reminis mem search "sqlite"`
 
 ---
@@ -208,7 +237,7 @@ CREATE INDEX IF NOT EXISTS idx_tasks_run_id ON tasks(run_id);
 
 - [ ] **Milestone 1: Core Engine & Resilience**
   - Implement `internal/blackboard` with concurrent snapshotting and checkpoint serialization.
-  - Implement `internal/dag` with dependency resolution, cycle checking, and cascading skip on failure.
+  - Implement `internal/dag` with dependency resolution, cycle checking, cascading skip on failure, and `WAITING_APPROVAL` pause.
   - Implement `internal/store` with pure-Go SQLite migrations and CRUD.
 - [ ] **Milestone 2: Worker & Tool Execution (Max 3 Turns)**
   - Implement HTTP client for OpenAI-compatible endpoints with Level 1 exponential backoff.
@@ -218,10 +247,10 @@ CREATE INDEX IF NOT EXISTS idx_tasks_run_id ON tasks(run_id);
   - LLM-based DAG generator with automatic chunking for tasks exceeding 3 tool calls.
   - Aggregator / Reducer worker pattern for combining partial findings into Blackboard.
   - Concurrent DAG execution pipeline with checkpointing and structured error reporting.
-  - Implement `reminis resume <run_id>`.
+  - Implement `reminis resume <run_id>` and `reminis approve <run_id> <task_id>`.
 - [ ] **Milestone 4: Sessions & Fact Retrieval (Engram-parity)**
   - `sessions` lifecycle and automatic fact extraction/indexing.
   - Topic-based and keyword-based fast search.
 - [ ] **Milestone 5: Interfaces**
-  - CLI commands (`reminis run`, `reminis resume`, `reminis mem`, `reminis status`).
+  - CLI commands (`reminis run`, `reminis resume`, `reminis approve`, `reminis mem`, `reminis status`).
   - Native MCP Server (`reminis mcp`).
