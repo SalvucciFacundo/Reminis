@@ -1,6 +1,6 @@
 # Reminis Architecture Specification
 
-**Version:** 0.3.0  
+**Version:** 0.4.0  
 **Status:** Approved Specification  
 **Language:** Go (1.23+)  
 **Module:** `github.com/fds1288/reminis`  
@@ -47,6 +47,7 @@ Modern LLM agents suffer from the **quadratic context problem**:
    │  Worker (Task A)     │                  │  Worker (Task B)     │
    │  • Micro-prompt      │                  │  • Micro-prompt      │
    │  • Goroutine 1       │                  │  • Goroutine 2       │
+   │  • Max 3 Tool Calls  │                  │  • Max 3 Tool Calls  │
    │  • Context discarded │                  │  • Context discarded │
    └──────────┬───────────┘                  └──────────┬───────────┘
               │                                         │
@@ -75,8 +76,6 @@ A concurrent, thread-safe memory ledger representing the ground truth of the act
 - **Checkpointing:** State snapshots are flushed to SQLite after every task transition to enable resume-on-failure without recalculating completed tasks.
 
 ### 3.2 Task Graph & Failure Handling (3-Level Resilience)
-When a task encounters an error during execution, Reminis applies a tiered resolution strategy:
-
 1. **Level 1 (Transient Infra Errors):** 429 rate limits, connection timeouts, or 500 API errors are retried up to 3 times in pure Go using exponential backoff with jitter (zero LLM tokens burned).
 2. **Level 2 (Semantic / Validation Errors):** If the LLM generates invalid JSON, broken syntax, or fails an assertion, a local reflection prompt (max 2 attempts) is sent to that specific worker with the exact error.
 3. **Level 3 (Hard Blockers & Checkpoint Freezing):**
@@ -87,8 +86,16 @@ When a task encounters an error during execution, Reminis applies a tiered resol
    - All state is preserved in SQLite, allowing the host agent or user to resolve the blocker and run `reminis resume <run_id>`.
    - *Optional:* When `--auto-recover` is enabled, Reminis executes one final surgical call to the Planner with the full post-run Blackboard state to formulate an alternative branch.
 
-### 3.3 Structured Failure Telemetry
-Reminis guarantees explicit, structured error reporting back to the host agent:
+### 3.3 Ephemeral Workers & Bounded Tool Execution (Max 3 Turns)
+Workers are permitted to execute real-world tools (`bash`, `read_file`, `write_file`, `git`), governed by strict bounding rules:
+1. **Hard Budget:** Maximum **3 tool execution turns** per worker.
+2. **Map-Reduce / Fan-Out Fan-In Pattern:**
+   - If an inspection requires more than 3 tool calls (e.g. analyzing 10 different files or multiple commits), the task is chunked across multiple parallel workers.
+   - Each worker inspects its assigned partition and writes partial observations to the Blackboard.
+   - An **Aggregator / Reducer Worker** reads the partial Blackboard entries and synthesizes the unified conclusion.
+3. **Context Destruction:** Large tool outputs (e.g., 50,000 tokens of raw `git diff` or build logs) exist only within the ephemeral worker's temporary process. Once the worker summarizes its findings into the Blackboard, its entire conversation context is garbage collected.
+
+### 3.4 Structured Telemetry
 ```go
 type RunResult struct {
     RunID           string       `json:"run_id"`
@@ -108,14 +115,6 @@ type TaskFailure struct {
     LastPayload string `json:"last_payload,omitempty"`
 }
 ```
-
-### 3.4 Ephemeral Worker Engine
-- **Stateless Request:** Combines:
-  1. System Prompt (Task role).
-  2. Blackboard inputs (strict JSON slice).
-  3. Action Directive.
-- **Budget:** 300 to 800 tokens total.
-- **Destruction:** Response is parsed into typed outputs and written to the Blackboard. The worker's LLM conversation context is completely discarded.
 
 ### 3.5 Archival Store (SQLite Pure-Go)
 - **Driver:** `modernc.org/sqlite` (100% CGO-free, cross-compilable to any OS/architecture).
@@ -144,6 +143,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     depends_on TEXT,      -- JSON array of task IDs
     input_data TEXT,      -- JSON payload of injected inputs
     output_data TEXT,     -- JSON payload of worker outputs
+    tool_calls_count INTEGER DEFAULT 0,
     duration_ms INTEGER DEFAULT 0,
     tokens INTEGER DEFAULT 0,
     error TEXT,
@@ -210,11 +210,13 @@ CREATE INDEX IF NOT EXISTS idx_tasks_run_id ON tasks(run_id);
   - Implement `internal/blackboard` with concurrent snapshotting and checkpoint serialization.
   - Implement `internal/dag` with dependency resolution, cycle checking, and cascading skip on failure.
   - Implement `internal/store` with pure-Go SQLite migrations and CRUD.
-- [ ] **Milestone 2: Worker & LLM Client**
+- [ ] **Milestone 2: Worker & Tool Execution (Max 3 Turns)**
   - Implement HTTP client for OpenAI-compatible endpoints with Level 1 exponential backoff.
-  - Ephemeral prompt synthesizer and Level 2 reflection loop.
-- [ ] **Milestone 3: Planner & Orchestrator**
-  - LLM-based DAG generator (Goal -> Task list with dependencies).
+  - Tool execution loop capped at 3 turns with context destruction.
+  - Level 2 reflection loop.
+- [ ] **Milestone 3: Planner, Map-Reduce & Orchestrator**
+  - LLM-based DAG generator with automatic chunking for tasks exceeding 3 tool calls.
+  - Aggregator / Reducer worker pattern for combining partial findings into Blackboard.
   - Concurrent DAG execution pipeline with checkpointing and structured error reporting.
   - Implement `reminis resume <run_id>`.
 - [ ] **Milestone 4: Sessions & Fact Retrieval (Engram-parity)**
