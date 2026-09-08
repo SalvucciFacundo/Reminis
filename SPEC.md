@@ -254,3 +254,21 @@ CREATE INDEX IF NOT EXISTS idx_tasks_run_id ON tasks(run_id);
 - [ ] **Milestone 5: Interfaces**
   - CLI commands (`reminis run`, `reminis resume`, `reminis approve`, `reminis mem`, `reminis status`).
   - Native MCP Server (`reminis mcp`).
+
+---
+
+## 7. Future Vision & Extensibility
+
+### 7.1 Deep Integration with CodeGraph (Deterministic Dependency Discovery)
+Currently, the Planner uses LLM reasoning to decompose a goal into a DAG. In future iterations, Reminis can connect natively to **CodeGraph**:
+1. **CodeGraph-Directed Planning:** When tasked with a codebase refactor or bugfix, Reminis queries CodeGraph CLI/MCP (`codegraph callers`, `codegraph impact`, `codegraph affected`) before prompting the Planner.
+2. **True Deterministic DAGs:** Instead of hallucinating dependencies, the DAG is constructed directly from the AST and symbol call graph:
+   - Node 1: Target interface / symbol modification.
+   - Nodes 2..N: Parallel worker goroutines updating affected callers identified by CodeGraph.
+3. **Blast-Radius Verification:** Post-execution verification queries CodeGraph to confirm no broken references remain across the workspace.
+
+### 7.2 Scaling to a Unified Cognitive Layer (All-in-One Engine)
+While Reminis currently focuses on L1 Working Memory and DAG orchestration, its pure-Go SQLite persistence architecture allows seamless expansion into a self-contained cognitive memory engine:
+1. **Vector & Full-Text Search (Pure-Go SQLite FTS5 / sqlite-vec):** Embedding support for local semantic similarity searches without external vector databases.
+2. **Episodic Memory Clustering:** Automatically clustering past successful runs into reusable execution templates ("How I previously solved migration X").
+3. **Ecosystem Unification:** Serving as the unified memory and execution backbone for lightweight Go agents (like AGIS), eliminating the need for separate Python-based memory sidecars.
