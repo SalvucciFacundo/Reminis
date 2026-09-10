@@ -1,6 +1,6 @@
 # Reminis Architecture Specification
 
-**Version:** 0.5.0  
+**Version:** 0.6.0  
 **Status:** Approved Specification  
 **Language:** Go (1.23+)  
 **Module:** `github.com/fds1288/reminis`  
@@ -72,7 +72,8 @@ Modern LLM agents suffer from the **quadratic context problem**:
 ### 3.1 Blackboard (Working Memory)
 A concurrent, thread-safe memory ledger representing the ground truth of the active workflow run.
 - **Implementation:** `sync.RWMutex` guarding an in-memory key-value map.
-- **Isolation:** Workers receive an immutable sub-slice containing strictly the keys declared in their `InputKeys`.
+- **Namespace Isolation:** Each task writes strictly to its dedicated namespace (`tasks.<task_id>.output`). Multiple parallel tasks cannot write to the same key.
+- **4KB Size Ceiling (Pass-by-Reference):** Individual Blackboard values must not exceed 4KB. Large payloads (diffs, CSVs, build logs) are spilled to a run-scoped directory (`~/.reminis/runs/<run_id>/artifacts/`), storing only the file path in the Blackboard.
 - **Checkpointing:** State snapshots are flushed to SQLite after every task transition to enable resume-on-failure without recalculating completed tasks.
 
 ### 3.2 Task Graph & Failure Handling (3-Level Resilience)
@@ -84,10 +85,9 @@ A concurrent, thread-safe memory ledger representing the ground truth of the act
    - Independent, parallel branches continue to completion.
    - The run transitions to `FAILED_WITH_CHECKPOINT`.
    - All state is preserved in SQLite, allowing the host agent or user to resolve the blocker and run `reminis resume <run_id>`.
-   - *Optional:* When `--auto-recover` is enabled, Reminis executes one final surgical call to the Planner with the full post-run Blackboard state to formulate an alternative branch.
 
 ### 3.3 Human-in-the-Loop Approval Gates
-Potentially destructive or high-impact actions (file deletion, database drops, git force-pushes, deployments) can be gated by an approval requirement:
+Potentially destructive or high-impact actions (file deletion, database drops, git force-pushes, deployments) are gated by an approval requirement:
 - **Task Flag:** `RequiresApproval: true`.
 - **State Transition:** The task pauses in `WAITING_APPROVAL`, while non-dependent tasks continue execution.
 - **Granular Permission Scopes:**
@@ -102,9 +102,50 @@ Workers are permitted to execute real-world tools (`bash`, `read_file`, `write_f
    - If an inspection requires more than 3 tool calls (e.g. analyzing 10 different files or multiple commits), the task is chunked across multiple parallel workers.
    - Each worker inspects its assigned partition and writes partial observations to the Blackboard.
    - An **Aggregator / Reducer Worker** reads the partial Blackboard entries and synthesizes the unified conclusion.
-3. **Context Destruction:** Large tool outputs (e.g., 50,000 tokens of raw `git diff` or build logs) exist only within the ephemeral worker's temporary process. Once the worker summarizes its findings into the Blackboard, its entire conversation context is garbage collected.
+3. **Context Destruction:** Large tool outputs exist only within the ephemeral worker's temporary process. Once the worker summarizes its findings into the Blackboard, its entire conversation context is garbage collected.
 
-### 3.5 Structured Telemetry & Task Structs
+### 3.5 Cold-Start Prevention (Global Project Manifest)
+To prevent workers from hallucinating architectural conventions (e.g., using `Gin` when the project uses `net/http`), Reminis automatically injects an invariant **Project Manifest** (~100 tokens) into the Static Prefix:
+```json
+{
+  "project_name": "example-app",
+  "language": "Go 1.23",
+  "frameworks": ["net/http", "modernc.org/sqlite"],
+  "conventions": "standard clean architecture, idiomatic error handling"
+}
+```
+
+### 3.6 Event-Driven Telemetry (Live Streaming UX)
+Reminis avoids the "black box" syndrome by streaming execution state in real time via Go channels (`chan Event`) and SSE (Server-Sent Events) over MCP/HTTP:
+- `EventRunStarted(run_id, total_tasks)`
+- `EventTaskStarted(task_id, action)`
+- `EventTaskWaitingApproval(task_id, action, diff)`
+- `EventTaskCompleted(task_id, duration_ms, tokens)`
+- `EventTaskFailed(task_id, error, can_retry)`
+- `EventRunFinished(run_id, status, total_tokens)`
+
+### 3.7 Prompt Caching Optimization (Prefix Stability Pattern)
+Providers (Google Gemini, Anthropic Claude, OpenAI) offer prompt caching with 50%–90% cost and latency discounts when prompt prefixes remain static.
+
+Reminis maximizes cache hits while maintaining strict context isolation by enforcing the **Prefix Stability Pattern**:
+1. **Invariant Static Prefix (Cached):** Placed at the very top of every worker prompt:
+   - System persona & operational rules.
+   - Global Project Manifest.
+   - Tool schemas & JSON definitions.
+   - Standard output format specifications.
+2. **Dynamic Tail (Non-Cached Append-Only):** Placed strictly at the bottom of the prompt:
+   - Blackboard injected slice (`InputKeys`).
+   - Specific action directive for the current node.
+
+### 3.8 Concurrency & Storage Guardrails
+1. **Topological Cycle Validation:** The DAG scheduler verifies graph acyclicity using Kahn's algorithm prior to execution. Circular dependencies are rejected immediately.
+2. **SQLite Lock Contention Prevention:** Although SQLite WAL mode allows concurrent readers, writes must be serialized. Reminis manages database writes through a dedicated single-writer channel in Go with `busy_timeout=5000ms`, preventing `SQLITE_BUSY` errors during parallel worker completion bursts.
+3. **Run Artifact Lifecycle:** Files spilled to `~/.reminis/runs/<run_id>/artifacts/` are tracked in the `runs` table. Ephemeral scratch data is purged upon successful run termination, while designated artifacts are retained for user inspection.
+
+---
+
+## 4. Structured Telemetry & Data Schemas
+
 ```go
 type TaskStatus string
 
@@ -141,34 +182,31 @@ type RunResult struct {
 }
 ```
 
-### 3.6 Archival Store (SQLite Pure-Go)
-- **Driver:** `modernc.org/sqlite` (100% CGO-free, cross-compilable to any OS/architecture).
-- **Concurrency Settings:** `PRAGMA journal_mode=WAL;`, `PRAGMA busy_timeout=5000;`.
-- **Database Schema:**
+---
+
+## 5. Database Schema (SQLite Pure-Go)
 
 ```sql
--- Active and past workflow runs
 CREATE TABLE IF NOT EXISTS runs (
     id TEXT PRIMARY KEY,
     session_id TEXT,
     goal TEXT NOT NULL,
-    status TEXT NOT NULL, -- PENDING, RUNNING, WAITING_APPROVAL, COMPLETED, FAILED_WITH_CHECKPOINT
+    status TEXT NOT NULL,
     total_tokens INTEGER DEFAULT 0,
-    checkpoint_state TEXT, -- Serialized Blackboard JSON
+    checkpoint_state TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     finished_at DATETIME
 );
 
--- Discrete tasks within a DAG
 CREATE TABLE IF NOT EXISTS tasks (
     id TEXT PRIMARY KEY,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
     action TEXT NOT NULL,
-    status TEXT NOT NULL, -- PENDING, RUNNING, WAITING_APPROVAL, COMPLETED, FAILED, SKIPPED
+    status TEXT NOT NULL,
     requires_approval BOOLEAN DEFAULT FALSE,
-    depends_on TEXT,      -- JSON array of task IDs
-    input_data TEXT,      -- JSON payload of injected inputs
-    output_data TEXT,     -- JSON payload of worker outputs
+    depends_on TEXT,
+    input_data TEXT,
+    output_data TEXT,
     tool_calls_count INTEGER DEFAULT 0,
     duration_ms INTEGER DEFAULT 0,
     tokens INTEGER DEFAULT 0,
@@ -176,24 +214,22 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- Sessions (Engram-compatible session tracking)
 CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     project_path TEXT NOT NULL,
-    status TEXT NOT NULL, -- ACTIVE, CLOSED
+    status TEXT NOT NULL,
     summary TEXT,
-    permissions_scope TEXT DEFAULT 'action', -- action, session, permanent
+    permissions_scope TEXT DEFAULT 'action',
     started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     ended_at DATETIME
 );
 
--- Persistent facts / semantic memory
 CREATE TABLE IF NOT EXISTS facts (
     id TEXT PRIMARY KEY,
     session_id TEXT,
     topic TEXT NOT NULL,
     content TEXT NOT NULL,
-    scope TEXT DEFAULT 'project', -- project, user, global
+    scope TEXT DEFAULT 'project',
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -204,85 +240,26 @@ CREATE INDEX IF NOT EXISTS idx_tasks_run_id ON tasks(run_id);
 
 ---
 
-## 4. Interfaces & Consumption Models
-
-1. **Go Library (`pkg/client`):** Directly imported into Go applications (like AGIS) for zero-latency, embedded agent orchestration.
-2. **Model Context Protocol (`reminis mcp`):** Exposes JSON-RPC over stdio so external IDEs and agents (Antigravity, Hermes, Cursor) can invoke Reminis memory and DAG tools natively:
-   - `reminis_session_start(project_path)`
-   - `reminis_save_fact(topic, content)`
-   - `reminis_query_facts(query)`
-   - `reminis_run_workflow(goal)`
-   - `reminis_resume_workflow(run_id)`
-   - `reminis_approve_task(run_id, task_id, scope)`
-3. **CLI (`cmd/reminis`):** Standalone terminal command for running tasks, inspecting memory, and managing sessions:
-   - `reminis run "Crear endpoint de login"`
-   - `reminis resume <run_id>`
-   - `reminis approve <run_id> <task_id> [--scope=action|session|permanent]`
-   - `reminis mem search "sqlite"`
-
----
-
-## 5. Technical Specifications & Dependencies
-
-| Component | Choice | Rationale |
-| :--- | :--- | :--- |
-| **Language** | Go 1.23+ | Native goroutines, fast startup, single static binary. |
-| **Database Driver** | `modernc.org/sqlite` | Pure Go, zero CGO requirements, runs on any ARM64/AMD64 OS. |
-| **Concurrency** | `sync.RWMutex`, `golang.org/x/sync/errgroup` | Race-free concurrent DAG dispatch. |
-| **LLM Protocol** | OpenAI-compatible HTTP | Native compatibility with local `llama-server`, Ollama, Gemini, Groq, OpenRouter. |
-
----
-
 ## 6. Implementation Roadmap
 
-- [ ] **Milestone 1: Core Engine & Resilience**
-  - Implement `internal/blackboard` with concurrent snapshotting and checkpoint serialization.
-  - Implement `internal/dag` with dependency resolution, cycle checking, cascading skip on failure, and `WAITING_APPROVAL` pause.
-  - Implement `internal/store` with pure-Go SQLite migrations and CRUD.
-- [ ] **Milestone 2: Worker & Tool Execution (Max 3 Turns)**
-  - Implement HTTP client for OpenAI-compatible endpoints with Level 1 exponential backoff.
-  - Tool execution loop capped at 3 turns with context destruction.
-  - Level 2 reflection loop.
-- [ ] **Milestone 3: Planner, Map-Reduce & Orchestrator**
-  - LLM-based DAG generator with automatic chunking for tasks exceeding 3 tool calls.
-  - Aggregator / Reducer worker pattern for combining partial findings into Blackboard.
-  - Concurrent DAG execution pipeline with checkpointing and structured error reporting.
-  - Implement `reminis resume <run_id>` and `reminis approve <run_id> <task_id>`.
-- [ ] **Milestone 4: Sessions & Fact Retrieval (Engram-parity)**
-  - `sessions` lifecycle and automatic fact extraction/indexing.
-  - Topic-based and keyword-based fast search.
-- [ ] **Milestone 5: Interfaces**
-  - CLI commands (`reminis run`, `reminis resume`, `reminis approve`, `reminis mem`, `reminis status`).
-  - Native MCP Server (`reminis mcp`).
-
----
-
-## 7. Future Vision & Extensibility
-
-### 7.1 Deep Integration with CodeGraph (Deterministic Dependency Discovery)
-Currently, the Planner uses LLM reasoning to decompose a goal into a DAG. In future iterations, Reminis can connect natively to **CodeGraph**:
-1. **CodeGraph-Directed Planning:** When tasked with a codebase refactor or bugfix, Reminis queries CodeGraph CLI/MCP (`codegraph callers`, `codegraph impact`, `codegraph affected`) before prompting the Planner.
-2. **True Deterministic DAGs:** Instead of hallucinating dependencies, the DAG is constructed directly from the AST and symbol call graph:
-   - Node 1: Target interface / symbol modification.
-   - Nodes 2..N: Parallel worker goroutines updating affected callers identified by CodeGraph.
-3. **Blast-Radius Verification:** Post-execution verification queries CodeGraph to confirm no broken references remain across the workspace.
-
-### 7.2 Scaling to a Unified Cognitive Layer (All-in-One Engine)
-While Reminis currently focuses on L1 Working Memory and DAG orchestration, its pure-Go SQLite persistence architecture allows seamless expansion into a self-contained cognitive memory engine:
-1. **Vector & Full-Text Search (Pure-Go SQLite FTS5 / sqlite-vec):** Embedding support for local semantic similarity searches without external vector databases.
-2. **Episodic Memory Clustering:** Automatically clustering past successful runs into reusable execution templates ("How I previously solved migration X").
-3. **Ecosystem Unification:** Serving as the unified memory and execution backbone for lightweight Go agents (like AGIS), eliminating the need for separate Python-based memory sidecars.
-
-### 3.7 Prompt Caching Optimization (Prefix Stability Pattern)
-Providers (Google Gemini, Anthropic Claude, OpenAI) offer prompt caching with 50%–90% cost and latency discounts when prompt prefixes remain static.
-
-Reminis maximizes cache hits while maintaining strict context isolation by enforcing the **Prefix Stability Pattern**:
-1. **Invariant Static Prefix (Cached):** Placed at the very top of every worker prompt:
-   - System persona & operational rules.
-   - Tool schemas & JSON definitions.
-   - Standard output format specifications.
-   *(Identical across all DAG workers, triggering provider-level KV-cache hits for 80%+ of prompt tokens).*
-2. **Dynamic Tail (Non-Cached Append-Only):** Placed strictly at the bottom of the prompt:
-   - Blackboard injected slice (`InputKeys`).
-   - Specific action directive for the current node.
-3. **Cache Invalidation Avoidance:** Timestamps, dynamic run IDs, or randomized seeds are NEVER placed in the system prefix; they are confined exclusively to the dynamic tail to prevent breaking cache prefix hashes.
+- [ ] **Milestone 1: Core Engine & Concurrency Guardrails**
+  - Implement `internal/blackboard` (thread-safe, 4KB spillover, namespacing).
+  - Implement `internal/dag` (Kahn's cycle validation, dependency resolution, cascading skips, approval pauses).
+  - Implement `internal/store` (pure-Go SQLite with single-writer channel and WAL mode).
+- [ ] **Milestone 2: Ephemeral Worker Engine**
+  - OpenAI-compatible HTTP client with Level 1 exponential backoff.
+  - Bounded tool execution loop (max 3 turns) with scratch context destruction.
+  - Level 2 local reflection.
+  - Prefix stability prompt builder with Project Manifest.
+- [ ] **Milestone 3: Planner & Orchestrator Pipeline**
+  - Planner prompt producing strictly typed DAGs.
+  - Map-Reduce worker chunking for large inspections.
+  - Live event streaming channel (`chan Event`).
+  - Checkpoint resume engine (`reminis resume <run_id>`).
+- [ ] **Milestone 4: Sessions, Approvals & Long-term Memory**
+  - Session lifecycle management and approval scopes (`action`, `session`, `permanent`).
+  - Fact extraction and keyword/topic retrieval.
+- [ ] **Milestone 5: Interfaces & Ecosystem Integration**
+  - CLI application (`reminis run`, `reminis resume`, `reminis approve`, `reminis mem`).
+  - Stdio Model Context Protocol server (`reminis mcp`).
+  - Go SDK (`pkg/client`) for AGIS integration.
