@@ -272,3 +272,17 @@ While Reminis currently focuses on L1 Working Memory and DAG orchestration, its 
 1. **Vector & Full-Text Search (Pure-Go SQLite FTS5 / sqlite-vec):** Embedding support for local semantic similarity searches without external vector databases.
 2. **Episodic Memory Clustering:** Automatically clustering past successful runs into reusable execution templates ("How I previously solved migration X").
 3. **Ecosystem Unification:** Serving as the unified memory and execution backbone for lightweight Go agents (like AGIS), eliminating the need for separate Python-based memory sidecars.
+
+### 3.7 Prompt Caching Optimization (Prefix Stability Pattern)
+Providers (Google Gemini, Anthropic Claude, OpenAI) offer prompt caching with 50%–90% cost and latency discounts when prompt prefixes remain static.
+
+Reminis maximizes cache hits while maintaining strict context isolation by enforcing the **Prefix Stability Pattern**:
+1. **Invariant Static Prefix (Cached):** Placed at the very top of every worker prompt:
+   - System persona & operational rules.
+   - Tool schemas & JSON definitions.
+   - Standard output format specifications.
+   *(Identical across all DAG workers, triggering provider-level KV-cache hits for 80%+ of prompt tokens).*
+2. **Dynamic Tail (Non-Cached Append-Only):** Placed strictly at the bottom of the prompt:
+   - Blackboard injected slice (`InputKeys`).
+   - Specific action directive for the current node.
+3. **Cache Invalidation Avoidance:** Timestamps, dynamic run IDs, or randomized seeds are NEVER placed in the system prefix; they are confined exclusively to the dynamic tail to prevent breaking cache prefix hashes.
