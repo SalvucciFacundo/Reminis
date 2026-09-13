@@ -124,6 +124,8 @@ func executeRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 
 	var (
 		model          string
+		baseURL        string
+		apiKey         string
 		maxConcurrency int
 		rulesPath      string
 		dbPath         string
@@ -131,6 +133,8 @@ func executeRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	)
 
 	fs.StringVar(&model, "model", "", "LLM model override (defaults to env OPENAI_MODEL or gpt-4o-mini)")
+	fs.StringVar(&baseURL, "base-url", "", "API Base URL override (defaults to env OPENAI_BASE_URL)")
+	fs.StringVar(&apiKey, "api-key", "", "API Key override (defaults to env OPENAI_API_KEY)")
 	fs.IntVar(&maxConcurrency, "max-concurrency", 4, "Maximum parallel worker goroutines")
 	fs.StringVar(&rulesPath, "rules", "", "Path to explicit custom rules file")
 	fs.StringVar(&dbPath, "db", "", "Path to SQLite database file")
@@ -189,6 +193,12 @@ func executeRun(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	}
 	if model != "" {
 		opts = append(opts, client.WithModel(model))
+	}
+	if baseURL != "" {
+		opts = append(opts, client.WithBaseURL(baseURL))
+	}
+	if apiKey != "" {
+		opts = append(opts, client.WithAPIKey(apiKey))
 	}
 	if rulesPath != "" {
 		opts = append(opts, client.WithRulesPath(rulesPath))

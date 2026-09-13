@@ -83,7 +83,11 @@ func New(opts ...Option) (*Client, error) {
 	sessionMgr := session.NewManager(dbStore)
 	memService := memory.NewMemoryService(dbStore)
 
-	workerClient := worker.NewClient(cfg.baseURL, cfg.apiKey, cfg.model)
+	var workerOpts []worker.ClientOption
+	if len(cfg.headers) > 0 {
+		workerOpts = append(workerOpts, worker.WithHeaders(cfg.headers))
+	}
+	workerClient := worker.NewClient(cfg.baseURL, cfg.apiKey, cfg.model, workerOpts...)
 
 	var approvalHandler dag.ApprovalHandler
 	if cfg.customApprovalHandler != nil {
@@ -170,7 +174,11 @@ func (c *Client) Run(ctx context.Context, req RunRequest) (*RunResponse, error) 
 			rulesOpts.CLIPath = req.RulesPath
 		}
 
-		workerClient := worker.NewClient(c.opts.baseURL, c.opts.apiKey, model)
+		var workerOpts []worker.ClientOption
+		if len(c.opts.headers) > 0 {
+			workerOpts = append(workerOpts, worker.WithHeaders(c.opts.headers))
+		}
+		workerClient := worker.NewClient(c.opts.baseURL, c.opts.apiKey, model, workerOpts...)
 
 		orch = orchestrator.New(orchestrator.Config{
 			DBStore:         c.store,

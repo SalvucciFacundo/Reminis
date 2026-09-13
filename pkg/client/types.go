@@ -74,6 +74,7 @@ type options struct {
 	globalDir      string
 	baseURL        string
 	apiKey         string
+	headers        map[string]string
 	autoApprove    bool
 	customStore           *store.Store
 	customPlanner         orchestrator.PlanRunner
@@ -141,6 +142,28 @@ func WithBaseURL(url string) Option {
 func WithAPIKey(key string) Option {
 	return func(o *options) {
 		o.apiKey = key
+	}
+}
+
+// WithHeader adds a single HTTP header to LLM API requests.
+func WithHeader(key, value string) Option {
+	return func(o *options) {
+		if o.headers == nil {
+			o.headers = make(map[string]string)
+		}
+		o.headers[key] = value
+	}
+}
+
+// WithHeaders sets additional HTTP headers for LLM API requests.
+func WithHeaders(headers map[string]string) Option {
+	return func(o *options) {
+		if o.headers == nil {
+			o.headers = make(map[string]string)
+		}
+		for k, v := range headers {
+			o.headers[k] = v
+		}
 	}
 }
 

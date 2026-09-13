@@ -75,6 +75,7 @@ type Client struct {
 	MaxRetries     int
 	InitialBackoff time.Duration
 	MaxBackoff     time.Duration
+	Headers        map[string]string
 }
 
 // ClientOption configures a Client instance.
@@ -84,6 +85,18 @@ type ClientOption func(*Client)
 func WithHTTPClient(httpClient *http.Client) ClientOption {
 	return func(c *Client) {
 		c.HTTPClient = httpClient
+	}
+}
+
+// WithHeaders sets additional HTTP headers for requests.
+func WithHeaders(headers map[string]string) ClientOption {
+	return func(c *Client) {
+		if c.Headers == nil {
+			c.Headers = make(map[string]string)
+		}
+		for k, v := range headers {
+			c.Headers[k] = v
+		}
 	}
 }
 
@@ -113,6 +126,7 @@ func NewClient(baseURL, apiKey, model string, opts ...ClientOption) *Client {
 		MaxRetries:     3,
 		InitialBackoff: 500 * time.Millisecond,
 		MaxBackoff:     5 * time.Second,
+		Headers:        make(map[string]string),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -183,6 +197,17 @@ func (c *Client) CreateChatCompletion(ctx context.Context, req ChatCompletionReq
 		httpReq.Header.Set("Content-Type", "application/json")
 		if c.APIKey != "" {
 			httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+		}
+		if strings.Contains(c.BaseURL, "opencode") {
+			if httpReq.Header.Get("x-opencode-session") == "" {
+				httpReq.Header.Set("x-opencode-session", "reminis-session")
+			}
+			if httpReq.Header.Get("x-opencode-client") == "" {
+				httpReq.Header.Set("x-opencode-client", "reminis")
+			}
+		}
+		for k, v := range c.Headers {
+			httpReq.Header.Set(k, v)
 		}
 
 		resp, err := c.HTTPClient.Do(httpReq)
