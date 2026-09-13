@@ -289,8 +289,17 @@ For comprehensive guides and technical deep dives:
 - [x] **Milestone 4: Sessions, Approvals & Long-term Memory** (`internal/session`, `internal/memory`)
 - [x] **Milestone 5: Interfaces & Ecosystem Integration** (`cmd/reminis`, `internal/mcp`, `pkg/client`)
 
+## Contributing
+
+Contributions are warmly welcome! Whether you found a bug, want to improve documentation, propose a performance optimization, or build a new integration:
+
+- 🐛 **Bug Reports & Issues:** Found unexpected behavior or an edge-case error? Open an issue on [GitHub Issues](https://github.com/SalvucciFacundo/Reminis/issues) with reproduction steps.
+- 💡 **Feature Requests & Ideas:** Open an issue with the `enhancement` label to discuss architectural ideas.
+- 🛠️ **Pull Requests:** Review our [Contributing Guide](CONTRIBUTING.md) for local development setup, testing standards, and conventional commit guidelines.
+
 ---
 
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
+
