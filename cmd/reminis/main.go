@@ -267,8 +267,16 @@ func executeResume(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	fs := flag.NewFlagSet("resume", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 
-	var dbPath string
+	var (
+		dbPath  string
+		baseURL string
+		apiKey  string
+		model   string
+	)
 	fs.StringVar(&dbPath, "db", "", "Path to SQLite database file")
+	fs.StringVar(&baseURL, "base-url", "", "API Base URL override (defaults to env OPENAI_BASE_URL)")
+	fs.StringVar(&apiKey, "api-key", "", "API Key override (defaults to env OPENAI_API_KEY)")
+	fs.StringVar(&model, "model", "", "LLM model override (defaults to env OPENAI_MODEL)")
 
 	remaining, err := parseFlagSet(fs, args)
 	if err != nil {
@@ -285,6 +293,15 @@ func executeResume(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 	opts := []client.Option{}
 	if dbPath != "" {
 		opts = append(opts, client.WithDBPath(dbPath))
+	}
+	if baseURL != "" {
+		opts = append(opts, client.WithBaseURL(baseURL))
+	}
+	if apiKey != "" {
+		opts = append(opts, client.WithAPIKey(apiKey))
+	}
+	if model != "" {
+		opts = append(opts, client.WithModel(model))
 	}
 
 	c, err := client.New(opts...)
@@ -338,11 +355,17 @@ func executeApprove(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	fs.SetOutput(stderr)
 
 	var (
-		scope  string
-		dbPath string
+		scope   string
+		dbPath  string
+		baseURL string
+		apiKey  string
+		model   string
 	)
 	fs.StringVar(&scope, "scope", "action", "Approval scope: 'action' or 'session'")
 	fs.StringVar(&dbPath, "db", "", "Path to SQLite database file")
+	fs.StringVar(&baseURL, "base-url", "", "API Base URL override (defaults to env OPENAI_BASE_URL)")
+	fs.StringVar(&apiKey, "api-key", "", "API Key override (defaults to env OPENAI_API_KEY)")
+	fs.StringVar(&model, "model", "", "LLM model override (defaults to env OPENAI_MODEL)")
 
 	remaining, err := parseFlagSet(fs, args)
 	if err != nil {
@@ -360,6 +383,15 @@ func executeApprove(args []string, stdin io.Reader, stdout, stderr io.Writer) in
 	opts := []client.Option{}
 	if dbPath != "" {
 		opts = append(opts, client.WithDBPath(dbPath))
+	}
+	if baseURL != "" {
+		opts = append(opts, client.WithBaseURL(baseURL))
+	}
+	if apiKey != "" {
+		opts = append(opts, client.WithAPIKey(apiKey))
+	}
+	if model != "" {
+		opts = append(opts, client.WithModel(model))
 	}
 
 	c, err := client.New(opts...)

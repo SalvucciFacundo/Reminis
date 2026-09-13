@@ -146,6 +146,12 @@ func (o *Orchestrator) Run(ctx context.Context, sessionID, goal string) (*dag.Ru
 		return nil, fmt.Errorf("failed to create run record: %w", err)
 	}
 
+	for i := range tasks {
+		if tasks[i].TimeoutSeconds > 0 && tasks[i].TimeoutSeconds < 60 {
+			tasks[i].TimeoutSeconds = 60
+		}
+	}
+
 	taskRecords := make([]store.TaskRecord, len(tasks))
 	for i, t := range tasks {
 		metaJSON, _ := json.Marshal(taskMetadata{

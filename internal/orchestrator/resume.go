@@ -60,6 +60,11 @@ func (o *Orchestrator) Resume(ctx context.Context, runID string) (*dag.RunResult
 			_ = json.Unmarshal([]byte(tr.InputData), &meta)
 		}
 
+		timeoutSec := meta.TimeoutSeconds
+		if timeoutSec > 0 && timeoutSec < 60 {
+			timeoutSec = 60
+		}
+
 		t := dag.Task{
 			ID:               tr.ID,
 			Action:           tr.Action,
@@ -68,7 +73,7 @@ func (o *Orchestrator) Resume(ctx context.Context, runID string) (*dag.RunResult
 			InputKeys:        meta.InputKeys,
 			OutputKeys:       meta.OutputKeys,
 			TargetPaths:      meta.TargetPaths,
-			TimeoutSeconds:   meta.TimeoutSeconds,
+			TimeoutSeconds:   timeoutSec,
 		}
 		if tr.OutputData != "" {
 			t.Result = json.RawMessage(tr.OutputData)
