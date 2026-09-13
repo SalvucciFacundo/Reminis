@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/fds1288/reminis/internal/prompt"
@@ -286,8 +285,8 @@ func (e *Executor) runIsolatedCommand(ctx context.Context, name string, args ...
 	cmd := exec.Command(name, args...)
 	cmd.Dir = e.WorkDir
 
-	// Linux/POSIX process group isolation: spawn in its own process group
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Process group isolation
+	setProcessGroup(cmd)
 
 	stream := &watchdogStream{
 		activity: make(chan struct{}, 64),
@@ -298,8 +297,6 @@ func (e *Executor) runIsolatedCommand(ctx context.Context, name string, args ...
 	if err := cmd.Start(); err != nil {
 		return "", fmt.Errorf("failed to start process %s: %w", name, err)
 	}
-
-	pgid := cmd.Process.Pid
 
 	doneCh := make(chan struct{})
 	var silenceKilled atomic.Bool
@@ -315,7 +312,7 @@ func (e *Executor) runIsolatedCommand(ctx context.Context, name string, args ...
 				return
 
 			case <-ctx.Done():
-				killProcessGroup(pgid)
+				killProcessGroup(cmd)
 				return
 
 			case <-stream.activity:
@@ -329,7 +326,7 @@ func (e *Executor) runIsolatedCommand(ctx context.Context, name string, args ...
 
 			case <-timer.C:
 				silenceKilled.Store(true)
-				killProcessGroup(pgid)
+				killProcessGroup(cmd)
 				return
 			}
 		}
@@ -355,9 +352,3 @@ func (e *Executor) runIsolatedCommand(ctx context.Context, name string, args ...
 	return output, nil
 }
 
-// killProcessGroup sends SIGKILL to the entire process group.
-func killProcessGroup(pgid int) {
-	if pgid > 0 {
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	}
-}
