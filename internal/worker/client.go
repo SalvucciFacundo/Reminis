@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/fds1288/reminis/internal/prompt"
@@ -74,8 +75,11 @@ type Client struct {
 	HTTPClient     *http.Client
 	MaxRetries     int
 	InitialBackoff time.Duration
-	MaxBackoff     time.Duration
-	Headers        map[string]string
+	MaxBackoff       time.Duration
+	Headers          map[string]string
+	promptTokens     atomic.Int64
+	completionTokens atomic.Int64
+	totalTokens      atomic.Int64
 }
 
 // ClientOption configures a Client instance.
@@ -132,6 +136,21 @@ func NewClient(baseURL, apiKey, model string, opts ...ClientOption) *Client {
 		opt(c)
 	}
 	return c
+}
+
+// TotalTokens returns the accumulated token count across all requests made by this client.
+func (c *Client) TotalTokens() int {
+	return int(c.totalTokens.Load())
+}
+
+// PromptTokens returns the accumulated prompt token count across all requests.
+func (c *Client) PromptTokens() int {
+	return int(c.promptTokens.Load())
+}
+
+// CompletionTokens returns the accumulated completion token count across all requests.
+func (c *Client) CompletionTokens() int {
+	return int(c.completionTokens.Load())
 }
 
 // isRetryableStatus returns true if the HTTP status code warrants Level 1 retry.
@@ -238,6 +257,11 @@ func (c *Client) CreateChatCompletion(ctx context.Context, req ChatCompletionReq
 			var completion ChatCompletionResponse
 			if err := json.Unmarshal(body, &completion); err != nil {
 				return nil, fmt.Errorf("failed to unmarshal completion response: %w (body: %s)", err, string(body))
+			}
+			if completion.Usage.TotalTokens > 0 {
+				c.promptTokens.Add(int64(completion.Usage.PromptTokens))
+				c.completionTokens.Add(int64(completion.Usage.CompletionTokens))
+				c.totalTokens.Add(int64(completion.Usage.TotalTokens))
 			}
 			return &completion, nil
 		}

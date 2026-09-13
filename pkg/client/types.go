@@ -36,9 +36,11 @@ type RunResponse struct {
 	WaitingTasks   []string        `json:"waiting_tasks,omitempty"`
 	FailedTask     *FailedTaskInfo `json:"failed_task,omitempty"`
 	CanResume      bool            `json:"can_resume"`
-	BlackboardKeys []string        `json:"blackboard_keys,omitempty"`
-	TotalTokens    int             `json:"total_tokens"`
-	Error          string          `json:"error,omitempty"`
+	BlackboardKeys   []string        `json:"blackboard_keys,omitempty"`
+	TotalTokens      int             `json:"total_tokens"`
+	PromptTokens     int             `json:"prompt_tokens,omitempty"`
+	CompletionTokens int             `json:"completion_tokens,omitempty"`
+	Error            string          `json:"error,omitempty"`
 }
 
 // Fact represents an architectural memory fact or learned convention.

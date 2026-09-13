@@ -345,7 +345,14 @@ func (o *Orchestrator) executeDAG(
 		if bb != nil {
 			snapBytes, _ = json.Marshal(bb.Snapshot())
 		}
-		_ = o.store.UpdateRunStatus(ctx, runID, string(result.Status), string(snapBytes), 0)
+		totalTokens := 0
+		if o.workerClient != nil {
+			totalTokens = o.workerClient.TotalTokens()
+			result.TotalTokens = totalTokens
+			result.PromptTokens = o.workerClient.PromptTokens()
+			result.CompletionTokens = o.workerClient.CompletionTokens()
+		}
+		_ = o.store.UpdateRunStatus(ctx, runID, string(result.Status), string(snapBytes), totalTokens)
 
 		// Emit EventRunFinished
 		o.events.Publish(Event{

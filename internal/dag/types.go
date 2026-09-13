@@ -57,6 +57,9 @@ type RunResult struct {
 	SkippedTasks   []string     `json:"skipped_tasks"`
 	WaitingTasks   []string     `json:"waiting_tasks,omitempty"`
 	FailedTask     *TaskFailure `json:"failed_task,omitempty"`
-	CanResume      bool         `json:"can_resume"`
-	BlackboardKeys []string     `json:"blackboard_keys"`
+	CanResume        bool         `json:"can_resume"`
+	BlackboardKeys   []string     `json:"blackboard_keys"`
+	TotalTokens      int          `json:"total_tokens,omitempty"`
+	PromptTokens     int          `json:"prompt_tokens,omitempty"`
+	CompletionTokens int          `json:"completion_tokens,omitempty"`
 }
