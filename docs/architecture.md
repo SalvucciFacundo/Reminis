@@ -76,23 +76,27 @@ Parallel workers targeting the same files acquire cooperative locks via `dag.Res
 
 Reminis protects workflows against network flakes, model hallucinations, and environment crashes:
 
-```
-[Task Execution]
-       │
-       ▼
- ┌───────────────┐   HTTP 429/500/Timeout
- │    Level 1    │ ──────────────────────► Exponential Backoff + Jitter (Pure Go)
- └───────┬───────┘
-         │ (Infra OK, but invalid JSON / cycles)
-         ▼
- ┌───────────────┐   Schema / Parse Error
- │    Level 2    │ ──────────────────────► Local Targeted Reflection (Max 2 attempts)
- └───────┬───────┘
-         │ (Reflection fails)
-         ▼
- ┌───────────────┐
- │    Level 3    │ ──────────────────────► Freeze Run to SQLite Checkpoint
- └───────────────┘                         (Atomic resume with `reminis resume <run_id>`)
+```mermaid
+flowchart TD
+    Exec[Task Execution] --> Check{Error Type?}
+    Check -->|None| Done[Task Completed]
+    Check -->|HTTP 429 / 500 / Timeout| L1[Level 1: Exponential Backoff + Jitter<br/>Zero LLM Tokens Burned]
+    L1 -->|Attempt <= 3| Exec
+    L1 -->|Exhausted| L3[Level 3: Freeze Run to SQLite Checkpoint]
+
+    Check -->|JSON / Syntax / Cycle Error| L2[Level 2: Targeted Local Reflection<br/>Feeds exact error back to Worker]
+    L2 -->|Attempt <= 2| Exec
+    L2 -->|Exhausted| L3
+
+    L3 --> Resume[Atomic Resumption<br/>reminis resume run_id]
+
+    classDef success fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#f8fafc;
+    classDef retry fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#f8fafc;
+    classDef freeze fill:#450a0a,stroke:#ef4444,stroke-width:2px,color:#fca5a5;
+
+    class Done success;
+    class L1,L2 retry;
+    class L3,Resume freeze;
 ```
 
 ---
@@ -121,3 +125,34 @@ Persistence (`internal/store`) uses pure-Go SQLite (`modernc.org/sqlite`) withou
 
 - **WAL Mode:** Enabled via `PRAGMA journal_mode=WAL;` for concurrent multi-reader access.
 - **Single-Writer Channel:** Write operations are funneled through a Go channel (`chan writeOp`) consumed by a dedicated background goroutine. Combined with `PRAGMA busy_timeout=5000;`, this eliminates `SQLITE_BUSY` errors during concurrent worker completion bursts.
+
+---
+
+## 8. Universal Rules Discovery Cascade
+
+To ensure workers adhere to user conventions without breaking existing developer setups (Gentle AI, Cursor, Claude Code, etc.), Reminis resolves configuration using a strict precedence cascade:
+
+```mermaid
+graph TD
+    CLI[1. CLI / Env Overrides: --rules, REMINIS_RULES] --> Merge
+    Repo[2. Project / Workspace: .reminis.yaml, AGENTS.md, CLAUDE.md, .cursorrules] --> Merge
+    Global[3. User Global Config: ~/.config/reminis/rules.md, ~/.config/gentle-ai/] --> Merge
+    Base[4. Reminis Baseline Fallback: Clean Architecture, Idiomatic Go, Bounded Tools] --> Merge
+
+    Merge[Deterministic Merger] --> Hash[Compute PrefixHash SHA-256]
+    Hash --> Check{Tokens >= 1024?}
+    Check -->|Yes| Freeze[Record in SQLite & Freeze SessionPrefix]
+    Check -->|No| Pad[Append Standard Tool Schemas & Few-Shots]
+    Pad --> Freeze
+
+    Freeze --> Workers[Distributed to All Ephemeral Workers<br/>Guarantees 100% Prompt Cache Hit Rate]
+
+    classDef input fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#f8fafc;
+    classDef process fill:#0f172a,stroke:#f59e0b,stroke-width:2px,color:#f8fafc;
+    classDef cache fill:#064e3b,stroke:#10b981,stroke-width:2px,color:#f8fafc;
+
+    class CLI,Repo,Global,Base input;
+    class Merge,Hash,Check,Pad process;
+    class Freeze,Workers cache;
+```
+
