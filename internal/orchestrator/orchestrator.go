@@ -351,6 +351,7 @@ func (o *Orchestrator) executeDAG(
 			result.TotalTokens = totalTokens
 			result.PromptTokens = o.workerClient.PromptTokens()
 			result.CompletionTokens = o.workerClient.CompletionTokens()
+			result.CachedTokens = o.workerClient.CachedTokens()
 		}
 		_ = o.store.UpdateRunStatus(ctx, runID, string(result.Status), string(snapBytes), totalTokens)
 

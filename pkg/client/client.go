@@ -356,6 +356,7 @@ func toRunResponse(dagResult *dag.RunResult, err error) *RunResponse {
 		resp.TotalTokens = dagResult.TotalTokens
 		resp.PromptTokens = dagResult.PromptTokens
 		resp.CompletionTokens = dagResult.CompletionTokens
+		resp.CachedTokens = dagResult.CachedTokens
 		if dagResult.FailedTask != nil {
 			resp.FailedTask = &FailedTaskInfo{
 				TaskID: dagResult.FailedTask.TaskID,

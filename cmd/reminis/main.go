@@ -670,7 +670,11 @@ func printRunSummary(stdout, stderr io.Writer, resp *client.RunResponse) {
 		fmt.Fprintf(stdout, "Skipped Tasks:   %d %v\n", len(resp.SkippedTasks), resp.SkippedTasks)
 	}
 	if resp.TotalTokens > 0 {
-		fmt.Fprintf(stdout, "Total Tokens:    %d (Prompt: %d, Completion: %d)\n", resp.TotalTokens, resp.PromptTokens, resp.CompletionTokens)
+		if resp.CachedTokens > 0 {
+			fmt.Fprintf(stdout, "Total Tokens:    %d (Prompt: %d, Completion: %d, Cached: %d)\n", resp.TotalTokens, resp.PromptTokens, resp.CompletionTokens, resp.CachedTokens)
+		} else {
+			fmt.Fprintf(stdout, "Total Tokens:    %d (Prompt: %d, Completion: %d)\n", resp.TotalTokens, resp.PromptTokens, resp.CompletionTokens)
+		}
 	}
 	if resp.FailedTask != nil {
 		fmt.Fprintf(stderr, "Failed Task:     %s (%s): %s\n", resp.FailedTask.TaskID, resp.FailedTask.Action, resp.FailedTask.Error)

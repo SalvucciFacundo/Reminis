@@ -40,6 +40,7 @@ type RunResponse struct {
 	TotalTokens      int             `json:"total_tokens"`
 	PromptTokens     int             `json:"prompt_tokens,omitempty"`
 	CompletionTokens int             `json:"completion_tokens,omitempty"`
+	CachedTokens     int             `json:"cached_tokens,omitempty"`
 	Error            string          `json:"error,omitempty"`
 }
 

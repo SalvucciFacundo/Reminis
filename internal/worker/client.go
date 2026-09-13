@@ -62,24 +62,31 @@ type Choice struct {
 
 // Usage captures token counts for the request.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens        int                 `json:"prompt_tokens"`
+	CompletionTokens    int                 `json:"completion_tokens"`
+	TotalTokens         int                 `json:"total_tokens"`
+	PromptTokensDetails PromptTokensDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// PromptTokensDetails contains token caching metrics.
+type PromptTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }
 
 // Client is an OpenAI-compatible HTTP client equipped with Level 1 exponential backoff resilience.
 type Client struct {
-	BaseURL        string
-	APIKey         string
-	Model          string
-	HTTPClient     *http.Client
-	MaxRetries     int
-	InitialBackoff time.Duration
+	BaseURL          string
+	APIKey           string
+	Model            string
+	HTTPClient       *http.Client
+	MaxRetries       int
+	InitialBackoff   time.Duration
 	MaxBackoff       time.Duration
 	Headers          map[string]string
 	promptTokens     atomic.Int64
 	completionTokens atomic.Int64
 	totalTokens      atomic.Int64
+	cachedTokens     atomic.Int64
 }
 
 // ClientOption configures a Client instance.
@@ -151,6 +158,11 @@ func (c *Client) PromptTokens() int {
 // CompletionTokens returns the accumulated completion token count across all requests.
 func (c *Client) CompletionTokens() int {
 	return int(c.completionTokens.Load())
+}
+
+// CachedTokens returns the accumulated prompt cached token count across all requests.
+func (c *Client) CachedTokens() int {
+	return int(c.cachedTokens.Load())
 }
 
 // isRetryableStatus returns true if the HTTP status code warrants Level 1 retry.
@@ -262,6 +274,9 @@ func (c *Client) CreateChatCompletion(ctx context.Context, req ChatCompletionReq
 				c.promptTokens.Add(int64(completion.Usage.PromptTokens))
 				c.completionTokens.Add(int64(completion.Usage.CompletionTokens))
 				c.totalTokens.Add(int64(completion.Usage.TotalTokens))
+				if completion.Usage.PromptTokensDetails.CachedTokens > 0 {
+					c.cachedTokens.Add(int64(completion.Usage.PromptTokensDetails.CachedTokens))
+				}
 			}
 			return &completion, nil
 		}
